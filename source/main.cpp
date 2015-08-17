@@ -1,39 +1,24 @@
 #include <GarrysMod/Lua/Interface.h>
+#include <interfaces.hpp>
+#include <lua.hpp>
 #include <cstdint>
-#include <interface.h>
 #include <hackedconvar.h>
-#include <inetchannel.h>
+
+#if defined CONCOMMANDX_SERVER
+
 #include <eiface.h>
+
+#elif defined CONCOMMANDX_CLIENT
+
 #include <cdll_int.h>
+
+#endif
 
 namespace global
 {
 
-#if defined _WIN32
-
-static CDllDemandLoader icvar_loader( "vstdlib.dll" );
-static CDllDemandLoader engine_loader( "engine.dll" );
-
-#elif defined __linux
-
-#if defined CONCOMMANDX_SERVER
-
-static CDllDemandLoader icvar_loader( "libvstdlib_srv.so" );
-static CDllDemandLoader engine_loader( "engine_srv.so" );
-
-#elif defined CONCOMMANDX_CLIENT
-
-static CDllDemandLoader icvar_loader( "libvstdlib.so" );
-static CDllDemandLoader engine_loader( "engine.so" );
-
-#endif
-
-#elif defined __APPLE__
-
-static CDllDemandLoader icvar_loader( "libvstdlib.dylib" );
-static CDllDemandLoader engine_loader( "engine.dylib" );
-
-#endif
+static SourceSDK::FactoryLoader icvar_loader( "vstdlib", true, IS_SERVERSIDE );
+static SourceSDK::FactoryLoader engine_loader( "engine", false, IS_SERVERSIDE );
 
 #if defined CONCOMMANDX_SERVER
 
@@ -54,19 +39,11 @@ static IVEngine *ivengine = nullptr;
 
 static void Initialize( lua_State *state )
 {
-	CreateInterfaceFn factory = icvar_loader.GetFactory( );
-	if( factory == nullptr )
-		LUA->ThrowError( "Couldn't get vstdlib factory. Critical error." );
-
-	icvar = static_cast<ICvar *>( factory( CVAR_INTERFACE_VERSION, nullptr ) );
+	icvar = engine_loader.GetInterface<ICvar>( CVAR_INTERFACE_VERSION );
 	if( icvar == nullptr )
 		LUA->ThrowError( "ICVar not initialized. Critical error." );
 
-	factory = engine_loader.GetFactory( );
-	if( factory == nullptr )
-		LUA->ThrowError( "Couldn't get engine factory. Critical error." );
-
-	ivengine = static_cast<IVEngine *>( factory( ivengine_name, nullptr ) );
+	ivengine = engine_loader.GetInterface<IVEngine>( ivengine_name );
 	if( ivengine == nullptr )
 		LUA->ThrowError( "IVEngineServer/Client not initialized. Critical error." );
 }
@@ -76,187 +53,213 @@ static void Initialize( lua_State *state )
 namespace concommand
 {
 
-struct userdata
+struct UserData
 {
-	void *data;
+	ConCommand *cmd;
 	uint8_t type;
+	const char *name_original;
 	char name[64];
+	const char *help_original;
 	char help[256];
 };
 
 static const char *metaname = "concommand";
 static uint8_t metatype = GarrysMod::Lua::Type::COUNT + 2;
+static const char *invalid_error = "invalid concommand";
+static const char *table_name = "concommands_objects";
 
-static const char *invalid_error = "concommand object is not valid";
-
-static userdata *Create( lua_State *state )
+inline void CheckType( lua_State *state, int32_t index )
 {
-	userdata *udata = static_cast<userdata *>( LUA->NewUserdata( sizeof( userdata ) ) );
+	if( !LUA->IsType( index, metatype ) )
+		luaL_typerror( state, index, metaname );
+}
+
+inline UserData *GetUserdata( lua_State *state, int32_t index )
+{
+	return static_cast<UserData *>( LUA->GetUserdata( index ) );
+}
+
+static ConCommand *Get( lua_State *state, int32_t index )
+{
+	CheckType( state, index );
+	ConCommand *command = static_cast<UserData *>( LUA->GetUserdata( index ) )->cmd;
+	if( command == nullptr )
+		LUA->ArgError( index, invalid_error );
+
+	return command;
+}
+
+inline void Push( lua_State *state, ConCommand *command )
+{
+	if( command == nullptr )
+	{
+		LUA->PushNil( );
+		return;
+	}
+
+	LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
+	LUA->PushUserdata( command );
+	LUA->GetTable( -2 );
+	if( LUA->IsType( -1, metatype ) )
+	{
+		LUA->Remove( -2 );
+		return;
+	}
+
+	LUA->Pop( 1 );
+
+	UserData *udata = static_cast<UserData *>( LUA->NewUserdata( sizeof( UserData ) ) );
+	udata->cmd = command;
 	udata->type = metatype;
+	udata->name_original = command->m_pszName;
+	udata->help_original = command->m_pszHelpString;
 
 	LUA->CreateMetaTableType( metaname, metatype );
 	LUA->SetMetaTable( -2 );
 
-	return udata;
+	LUA->CreateTable( );
+	lua_setfenv( state, -2 );
+
+	LUA->PushUserdata( command );
+	LUA->Push( -2 );
+	LUA->SetTable( -4 );
+	LUA->Remove( -2 );
 }
 
-inline userdata *GetUserdata( lua_State *state, int index )
+inline ConCommand *Destroy( lua_State *state, int32_t index )
 {
-	return static_cast<userdata *>( LUA->GetUserdata( index ) );
-}
+	UserData *udata = GetUserdata( state, 1 );
+	ConCommand *command = udata->cmd;
+	if( command == nullptr )
+		return nullptr;
 
-inline ConCommand *GetAndValidate( lua_State *state, int index, const char *err )
-{
-	ConCommand *cmd = static_cast<ConCommand *>( GetUserdata( state, index )->data );
-	if( cmd == nullptr )
-		LUA->ThrowError( err );
+	LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
+	LUA->PushUserdata( command );
+	LUA->PushNil( );
+	LUA->SetTable( -2 );
+	LUA->Pop( 1 );
 
-	return cmd;
+	command->m_pszName = udata->name_original;
+	command->m_pszHelpString = udata->help_original;
+	udata->cmd = nullptr;
+
+	return command;
 }
 
 LUA_FUNCTION_STATIC( gc )
 {
-	LUA->CheckType( 1, metatype );
-
-	userdata *udata = static_cast<userdata *>( LUA->GetUserdata( 1 ) );
-	if( udata->data == nullptr )
+	if( !LUA->IsType( 1, metatype ) )
 		return 0;
 
-	udata->data = nullptr;
-
+	Destroy( state, 1 );
 	return 0;
 }
 
 LUA_FUNCTION_STATIC( eq )
 {
-	LUA->CheckType( 1, metatype );
-	LUA->CheckType( 2, metatype );
-
-	ConCommand *cmd1 = GetAndValidate( state, 1, invalid_error );
-	ConCommand *cmd2 = GetAndValidate( state, 2, invalid_error );
-
-	LUA->PushBool( cmd1 == cmd2 );
-
+	LUA->PushBool( Get( state, 1 ) == Get( state, 2 ) );
 	return 1;
 }
 
 LUA_FUNCTION_STATIC( tostring )
 {
-	LUA->CheckType( 1, metatype );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	char formatted[30] = { 0 };
-	V_snprintf( formatted, sizeof( formatted ), "%s: 0x%p", metaname, cmd );
-	LUA->PushString( formatted );
-
+	lua_pushfstring( state, "%s: %p", metaname, Get( state, 1 ) );
 	return 1;
+}
+
+LUA_FUNCTION_STATIC( index )
+{
+	LUA->GetMetaTable( 1 );
+	LUA->Push( 2 );
+	LUA->RawGet( -2 );
+	if( !LUA->IsType( -1, GarrysMod::Lua::Type::NIL ) )
+		return 1;
+
+	LUA->Pop( 2 );
+
+	lua_getfenv( state, 1 );
+	LUA->Push( 2 );
+	LUA->RawGet( -2 );
+	return 1;
+}
+
+LUA_FUNCTION_STATIC( newindex )
+{
+	lua_getfenv( state, 1 );
+	LUA->Push( 2 );
+	LUA->Push( 3 );
+	LUA->RawSet( -3 );
+	return 0;
 }
 
 LUA_FUNCTION_STATIC( GetName )
 {
-	LUA->CheckType( 1, metatype );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	LUA->PushString( cmd->GetName( ) );
-
+	LUA->PushString( Get( state, 1 )->GetName( ) );
 	return 1;
 }
 
 LUA_FUNCTION_STATIC( SetName )
 {
-	LUA->CheckType( 1, metatype );
-	LUA->CheckType( 2, GarrysMod::Lua::Type::STRING );
-
-	userdata *udata = static_cast<userdata *>( LUA->GetUserdata( 1 ) );
-
-	ConCommand *cmd = static_cast<ConCommand *>( udata->data );
-	if( cmd == nullptr )
+	UserData *udata = GetUserdata( state, 1 );
+	ConCommand *command = udata->cmd;
+	if( command == nullptr )
 		LUA->ThrowError( invalid_error );
 
-	V_strncpy( udata->name, LUA->GetString( 2 ), sizeof( udata->name ) );
-	cmd->m_pszName = udata->name;
+	V_strncpy( udata->name, LUA->CheckString( 2 ), sizeof( udata->name ) );
+	command->m_pszName = udata->name;
 
 	return 0;
 }
 
 LUA_FUNCTION_STATIC( SetFlags )
 {
-	LUA->CheckType( 1, metatype );
-	LUA->CheckType( 2, GarrysMod::Lua::Type::NUMBER );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	cmd->m_nFlags = static_cast<int>( LUA->GetNumber( 2 ) );
-
+	Get( state, 1 )->m_nFlags = static_cast<int32_t>( LUA->CheckNumber( 2 ) );
 	return 0;
 }
 
 LUA_FUNCTION_STATIC( GetFlags )
 {
-	LUA->CheckType( 1, metatype );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	LUA->PushNumber( cmd->m_nFlags );
-
+	LUA->PushNumber( Get( state, 1 )->m_nFlags );
 	return 1;
 }
 
 LUA_FUNCTION_STATIC( HasFlag )
 {
-	LUA->CheckType( 1, metatype );
-	LUA->CheckType( 2, GarrysMod::Lua::Type::NUMBER );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	LUA->Push( cmd->IsFlagSet( static_cast<int>( LUA->GetNumber( 2 ) ) ) );
-
+	LUA->Push( Get( state, 1 )->IsFlagSet( static_cast<int32_t>( LUA->CheckNumber( 2 ) ) ) );
 	return 1;
 }
 
 LUA_FUNCTION_STATIC( SetHelpText )
 {
-	LUA->CheckType( 1, metatype );
-	LUA->CheckType( 2, GarrysMod::Lua::Type::STRING );
-
-	userdata *udata = static_cast<userdata *>( LUA->GetUserdata( 1 ) );
-
-	ConCommand *cmd = static_cast<ConCommand *>( udata->data );
-	if( cmd == nullptr )
+	UserData *udata = GetUserdata( state, 1 );
+	ConCommand *command = udata->cmd;
+	if( command == nullptr )
 		LUA->ThrowError( invalid_error );
 
-	V_strncpy( udata->help, LUA->GetString( 2 ), sizeof( udata->help ) );
-	cmd->m_pszHelpString = udata->help;
+	V_strncpy( udata->help, LUA->CheckString( 2 ), sizeof( udata->help ) );
+	command->m_pszHelpString = udata->help;
 
 	return 0;
 }
 
 LUA_FUNCTION_STATIC( GetHelpText )
 {
-	LUA->CheckType( 1, metatype );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	LUA->PushString( cmd->GetHelpText( ) );
-
+	LUA->PushString( Get( state, 1 )->GetHelpText( ) );
 	return 1;
 }
 
 LUA_FUNCTION_STATIC( Remove )
 {
-	LUA->CheckType( 1, metatype );
-
-	ConCommand *cmd = GetAndValidate( state, 1, invalid_error );
-
-	global::icvar->UnregisterConCommand( cmd );
-
+	CheckType( state, 1 );
+	global::icvar->UnregisterConCommand( Destroy( state, 1 ) );
 	return 0;
 }
 
-static void RegisterMetaTable( lua_State *state )
+static void Initialize( lua_State *state )
 {
+	LUA->CreateTable( );
+	LUA->SetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
+
 	LUA->CreateMetaTableType( metaname, metatype );
 
 	LUA->PushCFunction( gc );
@@ -267,6 +270,12 @@ static void RegisterMetaTable( lua_State *state )
 
 	LUA->PushCFunction( eq );
 	LUA->SetField( -2, "__eq" );
+
+	LUA->PushCFunction( index );
+	LUA->SetField( -2, "__index" );
+
+	LUA->PushCFunction( newindex );
+	LUA->SetField( -2, "__newindex" );
 
 	LUA->PushCFunction( GetName );
 	LUA->SetField( -2, "GetName" );
@@ -292,8 +301,16 @@ static void RegisterMetaTable( lua_State *state )
 	LUA->PushCFunction( Remove );
 	LUA->SetField( -2, "Remove" );
 
-	LUA->Push( -1 );
-	LUA->SetField( -2, "__index" );
+	LUA->Pop( 1 );
+}
+
+static void Deinitialize( lua_State *state )
+{
+	LUA->PushNil( );
+	LUA->SetField( GarrysMod::Lua::INDEX_REGISTRY, metaname );
+
+	LUA->PushNil( );
+	LUA->SetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
 }
 
 }
@@ -305,11 +322,11 @@ LUA_FUNCTION_STATIC( Exists )
 {
 	LUA->CheckType( 1, GarrysMod::Lua::Type::STRING );
 
-	ConCommand *cvar = global::icvar->FindCommand( LUA->GetString( 1 ) );
-	if( cvar == nullptr )
+	ConCommand *command = global::icvar->FindCommand( LUA->GetString( 1 ) );
+	if( command == nullptr )
 		LUA->PushBool( false );
 	else
-		LUA->PushBool( cvar->IsCommand( ) );
+		LUA->PushBool( command->IsCommand( ) );
 
 	return 1;
 }
@@ -322,10 +339,10 @@ LUA_FUNCTION_STATIC( GetAll )
 	ICvar::Iterator iter( global::icvar ); 
 	for( iter.SetFirst( ); iter.IsValid( ); iter.Next( ) )
 	{  
-		ConCommandBase *cmd = iter.Get( );
+		ConCommand *cmd = static_cast<ConCommand *>( iter.Get( ) );
 		if( cmd->IsCommand( ) )
 		{
-			concommand::Create( state )->data = cmd;
+			concommand::Push( state, cmd );
 			LUA->PushNumber( ++i );
 			LUA->SetTable( -3 );
 		}
@@ -336,13 +353,7 @@ LUA_FUNCTION_STATIC( GetAll )
 
 LUA_FUNCTION_STATIC( Get )
 {
-	LUA->CheckType( 1, GarrysMod::Lua::Type::STRING );
-
-	ConCommand *cmd = global::icvar->FindCommand( LUA->GetString( 1 ) );
-	if( cmd == nullptr )
-		return 0;
-
-	concommand::Create( state )->data = cmd;
+	concommand::Push( state, global::icvar->FindCommand( LUA->CheckString( 1 ) ) );
 	return 1;
 }
 
@@ -350,10 +361,7 @@ LUA_FUNCTION_STATIC( Get )
 
 LUA_FUNCTION_STATIC( Execute )
 {
-	LUA->CheckType( 1, GarrysMod::Lua::Type::STRING );
-
-	global::ivengine->ServerCommand( LUA->GetString( 1 ) );
-
+	global::ivengine->ServerCommand( LUA->CheckString( 1 ) );
 	return 0;
 }
 
@@ -361,32 +369,25 @@ LUA_FUNCTION_STATIC( Execute )
 
 LUA_FUNCTION_STATIC( Execute )
 {
-	LUA->CheckType( 1, GarrysMod::Lua::Type::STRING );
-
 	if( LUA->IsType( 2, GarrysMod::Lua::Type::BOOL ) && LUA->GetBool( 2 ) )
-		global::ivengine->ClientCmd_Unrestricted( LUA->GetString( 1 ) );
+		global::ivengine->ClientCmd_Unrestricted( LUA->CheckString( 1 ) );
 	else
-		global::ivengine->ClientCmd( LUA->GetString( 1 ) );
+		global::ivengine->ClientCmd( LUA->CheckString( 1 ) );
 
 	return 0;
 }
 
 LUA_FUNCTION_STATIC( ExecuteOnServer )
 {
-	LUA->CheckType( 1, GarrysMod::Lua::Type::STRING );
-
-	global::ivengine->ServerCmd( LUA->GetString( 1 ) );
-
+	global::ivengine->ServerCmd( LUA->CheckString( 1 ) );
 	return 0;
 }
 
 #endif
 
-static void RegisterGlobalTable( lua_State *state )
+static void Initialize( lua_State *state )
 {
-	LUA->PushSpecial( GarrysMod::Lua::SPECIAL_GLOB );
-
-	LUA->GetField( -1, "concommand" );
+	LUA->GetField( GarrysMod::Lua::INDEX_GLOBAL, "concommand" );
 
 	LUA->PushCFunction( Exists );
 	LUA->SetField( -2, "Exists" );
@@ -407,25 +408,52 @@ static void RegisterGlobalTable( lua_State *state )
 
 #endif
 
+	LUA->Pop( 1 );
+}
+
+static void Deinitialize( lua_State *state )
+{
+	LUA->GetField( GarrysMod::Lua::INDEX_GLOBAL, "concommand" );
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "Exists" );
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "GetAll" );
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "Get" );
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "Execute" );
+
+#if defined CONCOMMANDX_CLIENT
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "ExecuteOnServer" );
+
+#endif
+
+	LUA->Pop( 1 );
 }
 
 }
+
+#if defined CONCOMMANDX_SERVER
 
 namespace Player
 {
 
-#if defined CONCOMMANDX_SERVER
-
 static const char *invalid_error = "Player object is not valid";
 
-inline int GetEntityIndex( lua_State *state, int i )
+inline int32_t GetEntityIndex( lua_State *state, int32_t i )
 {
 	LUA->Push( i );
 	LUA->GetField( -1, "EntIndex" );
 	LUA->Push( -2 );
 	LUA->Call( 1, 1 );
 
-	return static_cast<int>( LUA->GetNumber( -1 ) );
+	return static_cast<int32_t>( LUA->GetNumber( -1 ) );
 }
 
 LUA_FUNCTION_STATIC( Command )
@@ -441,39 +469,55 @@ LUA_FUNCTION_STATIC( Command )
 	return 0;
 }
 
-#endif
-
-static void RegisterMetaTable( lua_State *state )
+static void Initialize( lua_State *state )
 {
-
-#if defined CONCOMMANDX_SERVER
-
 	LUA->CreateMetaTableType( "Player", GarrysMod::Lua::Type::ENTITY );
 
 	LUA->PushCFunction( Command );
 	LUA->SetField( -2, "Command" );
 
+	LUA->Pop( 1 );
+}
+
+static void Deinitialize( lua_State *state )
+{
+	LUA->CreateMetaTableType( "Player", GarrysMod::Lua::Type::ENTITY );
+
+	LUA->PushNil( );
+	LUA->SetField( -2, "Command" );
+
+	LUA->Pop( 1 );
+}
+
+}
+
 #endif
-
-}
-
-}
 
 GMOD_MODULE_OPEN( )
 {
 	global::Initialize( state );
+	concommands::Initialize( state );
+	concommand::Initialize( state );
 
-	concommands::RegisterGlobalTable( state );
+#if defined CONCOMMANDX_SERVER
 
-	concommand::RegisterMetaTable( state );
+	Player::Initialize( state );
 
-	Player::RegisterMetaTable( state );
+#endif
 
 	return 0;
 }
 
 GMOD_MODULE_CLOSE( )
 {
-	(void)state;
+
+#if defined CONCOMMANDX_SERVER
+
+	Player::Deinitialize( state );
+
+#endif
+
+	concommands::Deinitialize( state );
+	concommand::Deinitialize( state );
 	return 0;
 }
