@@ -39,7 +39,7 @@ static IVEngine *ivengine = nullptr;
 
 static void Initialize( lua_State *state )
 {
-	icvar = engine_loader.GetInterface<ICvar>( CVAR_INTERFACE_VERSION );
+	icvar = icvar_loader.GetInterface<ICvar>( CVAR_INTERFACE_VERSION );
 	if( icvar == nullptr )
 		LUA->ThrowError( "ICVar not initialized. Critical error." );
 
