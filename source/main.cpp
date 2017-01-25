@@ -17,8 +17,8 @@
 namespace global
 {
 
-static SourceSDK::FactoryLoader icvar_loader( "vstdlib", true, IS_SERVERSIDE );
-static SourceSDK::FactoryLoader engine_loader( "engine", false, IS_SERVERSIDE );
+static SourceSDK::FactoryLoader icvar_loader( "vstdlib", true, IS_SERVERSIDE, "bin/" );
+static SourceSDK::FactoryLoader engine_loader( "engine", false, IS_SERVERSIDE, "bin/" );
 
 #if defined CONCOMMANDX_SERVER
 
