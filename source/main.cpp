@@ -1,5 +1,5 @@
 #include <GarrysMod/Lua/Interface.h>
-#include <interfaces.hpp>
+#include <GarrysMod/Interfaces.hpp>
 #include <lua.hpp>
 #include <cstdint>
 #include <hackedconvar.h>
