@@ -12,8 +12,6 @@ end
 include(gmcommon)
 
 CreateWorkspace({name = "concommandx"})
-	warnings("Default")
-	
 	CreateProject({serverside = true})
 		IncludeLuaShared()
 		IncludeSDKCommon()
