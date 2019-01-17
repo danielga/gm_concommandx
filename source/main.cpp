@@ -134,7 +134,7 @@ inline ConCommand *Destroy( GarrysMod::Lua::ILuaBase *LUA, int32_t index )
 	LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
 	LUA->PushUserdata( command );
 	LUA->PushNil( );
-	LUA->SetTable( -2 );
+	LUA->SetTable( -3 );
 	LUA->Pop( 1 );
 
 	command->m_pszName = udata->name_original;
